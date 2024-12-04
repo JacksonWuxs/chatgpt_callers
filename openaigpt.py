@@ -36,7 +36,7 @@ def batchit(corpus, size=128):
 
 
 class _APISetup:
-    def __init__(self, secret_key, engine, function, max_retry=None, cool_down=1.0):
+    def __init__(self, secret_key, engine, function, do_cache=False, max_retry=None, cool_down=1.0):
         assert isinstance(secret_key, str)
         assert isinstance(engine, str)
         assert hasattr(openai, function)
@@ -47,15 +47,16 @@ class _APISetup:
         self._model = engine
         self._retry = max_retry
         self._cool = cool_down
-        self._lock = filelock.FileLock(STORED_FILE + ".lock")
+        self._lock = filelock.FileLock(STORED_FILE + ".lock") if do_cache else None
 
     def __call__(self, *args, **kwrds):
         inputs = self.preprocess(*args, **kwrds)
         internals = self.create(**inputs)
-        store = json.dumps({"INPUTS": inputs, "OUTPUTS": internals, "TIME": time.asctime()})
-        with self._lock:
-            with open(STORED_FILE, "a+") as f:
-                f.write(store + '\n')
+        if self._lock:
+            with self._lock:
+                with open(STORED_FILE, "a+") as f:
+                    store = {"INPUTS": inputs, "OUTPUTS": internals, "TIME": time.asctime()}
+                    f.write(json.dumps(store) + '\n')
         return self.postprocess(internals)
 
     def batch_call(self, queries, batch_size=None, workers=None):
@@ -77,7 +78,7 @@ class _APISetup:
                     return False
             except Exception as e:
                 if not report:
-                    print(("Unkown Error: %s" % e)[:50])
+                    print(("Unkown Error: %s" % e).replace("\n", "\\n"))
                     report = True
                     
             time.sleep(self._cool)
@@ -90,58 +91,21 @@ class _APISetup:
         return outputs
 
 
-class Instruct(_APISetup):
-    def __init__(self, secret_key, model="text-babbage-001", instruction=None, temperature=1.0, top_p=0.1, n=1):
-        _APISetup.__init__(self, secret_key, model, "Completion")
-        self._params = {"temperature": temperature, "top_p": top_p, "n": n}
-        self.instruction = instruction
-        
-    @property
-    def instruction(self):
-        return self._instruct
-
-    @instruction.setter
-    def instruction(self, prompt):
-        assert isinstance(prompt, str) or prompt is None
-        self._instruct = [prompt] if prompt else ['']
-
-    def preprocess(self, new_query):
-        prompt = []
-        prompt.extend(self._instruct)
-        prompt.append(new_query.strip())
-        prompt = "\n\n".join(prompt).strip()
-        inputs = {"prompt": prompt, "max_tokens": max(0, 1800 - len(prompt.split()))}
-        return inputs | self._params
-
-    def postprocess(self, response):
-        if response is False:
-            return False
-        return [_["text"] for _ in response["choices"]]
-
-    @classmethod
-    def Babbage(cls, secret_key, instruction=None, temperature=0.0, top_p=0.1, n=1):
-        return cls(secret_key, "text-babbage-001", instruction, temperature, top_p, n)
-
-    @classmethod
-    def Davinci(cls, secret_key, instruction=None, temperature=1.0, top_p=1.0, n=1):
-        return cls(secret_key, "text-davinci-003", instruction, temperature, top_p, n)
-
-
 
 class Chatting(_APISetup):
-    def __init__(self, secret_key, model, instruction=None, examples=None, cache=False, temperature=1.0, top_p=0.1, n=1):
+    def __init__(self, secret_key, model, system=None, examples=None, cache=False, temperature=1.0, top_p=0.1, n=1):
         _APISetup.__init__(self, secret_key, model, "ChatCompletion")
         self._params = {"temperature": temperature, "top_p": top_p, "n": n}
-        self.instruction = instruction
+        self.system = system
         self.examples = examples
         self._history = [] if cache else None
 
     @property
-    def instruction(self):
+    def system(self):
         return self._instruct
 
-    @instruction.setter
-    def instruction(self, prompt):
+    @system.setter
+    def system(self, prompt):
         assert isinstance(prompt, str) or prompt is None
         self._instruct = []
         if prompt is not None:
@@ -167,9 +131,7 @@ class Chatting(_APISetup):
 
     def preprocess(self, new_query):
         new_query = {"role": "user", "content": new_query}
-        inputs = []
-        inputs.extend(self._instruct)
-        inputs.extend(self._examples)
+        inputs = self._instruct + self._examples
         if self._history is not None:
             inputs.extend(self._history)
             self._history.append(new_query)
@@ -193,23 +155,15 @@ class Chatting(_APISetup):
         self._history[idx]["content"] = text
 
     @classmethod
-    def ChatGPT(cls, secret_key, instruction=None, examples=None, cache=False, temperature=0.0, top_p=0.1, n=1):
-        return cls(secret_key, "gpt-3.5-turbo-0613", instruction, examples, cache, temperature, top_p, n)
-
-    @classmethod
-    def GPT4(cls, secret_key, instruction=None, examples=None, cache=False, temperature=0.0, top_p=0.1, n=1):
-        return cls(secret_key, "gpt-4-0314", instruction, examples, cache, temperature, top_p, n)
+    def ChatGPT(cls, secret_key, model, system=None, examples=None, cache=False, temperature=0.0001, top_p=0.001, n=1):
+        return cls(secret_key, model, system, examples, cache, temperature, top_p, n)
 
 
 
 
 if __name__ == "__main__":
-    KEY = "XXXXXXXXXXXXXXXXXXXXXX" 
-    model = Chatting.ChatGPT(KEY)
+    KEY = "XXXXXXXXXXXXXX"
+    model = Chatting.ChatGPT(KEY, model="gpt-4o-2024-08-06")
     while True:
-        prompt = input("> User:")
-        print("> GPT: %s" % model.batch_call([prompt]))
-    
-        
-        
-        
+        prompt = input("> User: ")
+        print("> GPT: %s" % model(prompt)[0])
